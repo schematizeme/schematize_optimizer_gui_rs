@@ -1,0 +1,39 @@
+[package]
+# O CRATE segue o nome do repositório; o BINÁRIO é `schematize-optimizer-gui`.
+name = "schematize-optimizer-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Janela (Slint) do schematize-optimizer — casca VISUAL fina por cima do binário `schematize-optimizer` (headless, std-only). Mostra o diagnóstico da máquina e os tetos por software, e MOSTRA O QUE MUDA antes de aplicar — que é onde a janela ganha da CLI."
+license = "MIT"
+publish = false
+
+[[bin]]
+# Nome de binário que não bate com o dono já deixou o update do deployer morto por um release
+# inteiro, e nada dá erro nesse caso. O nome mora num lugar só.
+name = "schematize-optimizer-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Mesmo toolkit/backend das janelas irmãs (winit cobre Wayland+X11; renderer femtovg; sem skia
+# pra não exigir cmake). NÃO depende do crate `optimizer` de propósito: a casca só orquestra o
+# binário headless, então nunca embute versão via git-dep — o problema que originou o "abre a
+# versão antiga" na janela do market.
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "accessibility",
+] }
+
+[build-dependencies]
+slint-build = "1.17"
+
+# Perfil de release IDÊNTICO ao dos repos irmãos (schematize-cli, a GUI Slint e a janela do
+# market). O install.sh compila todos num `CARGO_TARGET_DIR` único; cargo só reaproveita um
+# artefato quando o perfil é IDÊNTICO, e a maior parte das dependências é a mesma. Divergir
+# aqui (um `opt-level` que seja) parte o cache e faz tudo compilar de novo.
+[profile.release]
+strip = true
+opt-level = 3
+lto = "thin"
