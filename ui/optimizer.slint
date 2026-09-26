@@ -104,6 +104,19 @@ export struct ServicoUI {
     explicacao: string,
 }
 
+// Um total agregado da aba Disco — serve às duas visões de cima (por disco e por tipo).
+export struct TotalDiscoUI { chave: string, tamanho: string, custa-rede: bool }
+// Uma pasta concreta que pode ser apagada.
+export struct AchadoUI {
+    caminho: string,
+    tipo: string,
+    tamanho: string,
+    dias-parado: int,
+    // Como isto se refaz, em uma linha. Vem PRONTO do app: montá-lo aqui criaria uma segunda
+    // versão do mesmo texto, e a que divergisse prometeria uma reconstrução que não acontece.
+    refaz: string,
+}
+
 export component MainWindow inherits Window {
     title: "schematize · optimizer";
     preferred-width: 760px;
@@ -113,7 +126,7 @@ export component MainWindow inherits Window {
     background: Th.bg;
 
     in-out property <bool> dark <=> Th.dark;
-    // 0 = Diagnóstico, 1 = Limites.
+    // 0 = Diagnóstico · 1 = Limites · 2 = Serviços · 3 = Disco · 4 = Agentes.
     in-out property <int> aba: 0;
 
     // ---- diagnóstico ----
@@ -138,10 +151,33 @@ export component MainWindow inherits Window {
     in-out property <string> diferenca;
     in-out property <bool> ha-mudanca: false;
     in-out property <string> limites-erro;
+
+    // ---- disco ----
+    in-out property <string> disco-total;
+    in-out property <[TotalDiscoUI]> disco-por-montagem;
+    in-out property <[TotalDiscoUI]> disco-por-tipo;
+    in-out property <[AchadoUI]> disco-achados;
+    in-out property <string> disco-erro;
+    // APAGAR abre TERMINAL (D6): a lista aparece lá ANTES da pergunta, e volume do Docker
+    // pergunta mesmo com `--yes`, porque volume é DADO.
+    callback disco-limpar();
+
+    // ---- agentes ----
+    in-out property <string> ag-cabem;
+    in-out property <string> ag-rodando;
+    in-out property <string> ag-gargalo;
+    in-out property <string> ag-threads;
+    in-out property <string> ag-ram;
+    in-out property <string> ag-carga;
+    in-out property <bool> ag-ram-apertada: false;
+    in-out property <string> agentes-erro;
     in-out property <[ServicoUI]> servicos;
     // A lista de serviços começa FECHADA: ela é secundária, e uma tela que abre com trinta
     // linhas de coisa secundária esconde o que é primário.
-    in-out property <bool> servicos-abertos: false;
+    // **Aberta por padrão desde que virou ABA própria.** Fechada fazia sentido quando ela era
+    // uma lista secundária dentro de Limites; numa aba que a pessoa escolheu abrir, esconder a
+    // resposta atrás de mais um clique é o mesmo defeito, de outro lado.
+    in-out property <bool> servicos-abertos: true;
     in-out property <string> msg;
 
     callback recarregar();
@@ -182,6 +218,21 @@ export component MainWindow inherits Window {
                     label: "Limites";
                     primary: root.aba == 1;
                     clicked => { root.aba = 1; }
+                }
+                Btn {
+                    label: "Serviços";
+                    primary: root.aba == 2;
+                    clicked => { root.aba = 2; }
+                }
+                Btn {
+                    label: "Disco";
+                    primary: root.aba == 3;
+                    clicked => { root.aba = 3; }
+                }
+                Btn {
+                    label: "Agentes";
+                    primary: root.aba == 4;
+                    clicked => { root.aba = 4; }
                 }
                 Btn {
                     label: root.dark ? "☾" : "☀";
@@ -445,7 +496,117 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // ---- Serviços de boot: lista SECUNDÁRIA, fechada por padrão ----
+            }
+        }
+
+        // ---- ABA SERVIÇOS (2) ----
+        //
+        // Era uma lista colapsada DENTRO de Limites. Virou aba própria na E3 da extradição:
+        // "o que sobe no boot" é uma pergunta inteira, e escondê-la atrás de um «Mostrar»
+        // dentro de outra tela fazia dela um rodapé do assunto errado.
+        if root.erro == "" && root.aba == 2: Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: svc.preferred-height;
+            svc := VerticalLayout {
+                width: parent.width;
+                spacing: 12px;
+            // A lista SÓ RELATA, e o "Mostrar/Esconder" ficou: são dezenas de unidades, e
+            // abrir tudo de cara afoga as três que importam.
+            Rectangle {
+                background: Th.surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Th.border;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "O que sobe no boot (" + root.servicos.length + ")";
+                                font-size: 14px;
+                                font-weight: 700;
+                                color: Th.text;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Btn {
+                            label: root.servicos-abertos ? "Esconder" : "Mostrar";
+                            clicked => { root.alternar-servicos(); }
+                        }
+                    }
+                    if !root.servicos-abertos: Text {
+                        text: "Esta lista só RELATA. Desabilitar serviço é onde se quebra máquina, e a causa fica longe do sintoma — então aqui não há botão, só o comando para você decidir item a item.";
+                        font-size: 12px;
+                        color: Th.text-dim;
+                        wrap: word-wrap;
+                    }
+                    if root.servicos-abertos: VerticalLayout {
+                        spacing: 8px;
+                        for s in root.servicos: VerticalLayout {
+                            spacing: 3px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: s.custo;
+                                    font-size: 12px;
+                                    font-family: "monospace";
+                                    color: Th.text-dim;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: s.unidade;
+                                    font-size: 12.5px;
+                                    color: Th.text;
+                                    vertical-alignment: center;
+                                }
+                                // Duas marcas, porque são duas afirmações: "auditado" é
+                                // propriedade do serviço; "vale a pena" é medição DESTA
+                                // máquina. Um serviço seguro que não custa nada aqui
+                                // continua seguro — só não vale o trabalho.
+                                if s.auditado: Text {
+                                    text: s.recomendado ? "· seguro e vale a pena" : "· seguro, mas não custa nada aqui";
+                                    font-size: 11.5px;
+                                    color: s.recomendado ? Th.good : Th.text-dim;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if s.explicacao != "": Text {
+                                text: s.explicacao;
+                                font-size: 11.5px;
+                                color: Th.text-dim;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+            }
+        }
+
+        // ---- ABA DISCO (3) ----
+        //
+        // O inventário do lixo RECRIÁVEL. Saiu do hub na E3 (ADR-0011/0018): enquanto morava
+        // lá, existiam DUAS telas do mesmo produto — e duas telas do mesmo produto divergem.
+        if root.erro == "" && root.aba == 3: Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: dsk.preferred-height;
+            dsk := VerticalLayout {
+                width: parent.width;
+                spacing: 12px;
+
+                if root.disco-erro != "": Text {
+                    text: root.disco-erro;
+                    font-size: 12.5px;
+                    color: Th.warn;
+                    wrap: word-wrap;
+                }
+
                 Rectangle {
                     background: Th.surface;
                     border-radius: 12px;
@@ -459,64 +620,176 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 alignment: center;
                                 Text {
-                                    text: "O que sobe no boot (" + root.servicos.length + ")";
-                                    font-size: 14px;
-                                    font-weight: 700;
+                                    text: "Recuperável: " + root.disco-total;
+                                    font-size: 15px;
+                                    font-weight: 800;
                                     color: Th.text;
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            // APAGAR abre TERMINAL (D6). A lista aparece lá ANTES da pergunta,
+                            // e volume do Docker pergunta mesmo com `--yes` — volume é DADO.
                             Btn {
-                                label: root.servicos-abertos ? "Esconder" : "Mostrar";
-                                clicked => { root.alternar-servicos(); }
+                                label: "Apagar (no terminal)";
+                                enabled: root.disco-achados.length > 0;
+                                clicked => { root.disco-limpar(); }
                             }
                         }
-                        if !root.servicos-abertos: Text {
-                            text: "Esta lista só RELATA. Desabilitar serviço é onde se quebra máquina, e a causa fica longe do sintoma — então aqui não há botão, só o comando para você decidir item a item.";
-                            font-size: 12px;
+                        Text {
+                            text: "Tudo nesta tela se REFAZ: artefato de build, cache de toolchain e camada de Docker. Nada é apagado daqui — o botão abre um terminal que mostra a lista e pergunta.";
+                            font-size: 11.5px;
                             color: Th.text-dim;
                             wrap: word-wrap;
                         }
-                        if root.servicos-abertos: VerticalLayout {
-                            spacing: 8px;
-                            for s in root.servicos: VerticalLayout {
-                                spacing: 3px;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Text {
-                                        text: s.custo;
-                                        font-size: 12px;
-                                        font-family: "monospace";
-                                        color: Th.text-dim;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: s.unidade;
-                                        font-size: 12.5px;
-                                        color: Th.text;
-                                        vertical-alignment: center;
-                                    }
-                                    // Duas marcas, porque são duas afirmações: "auditado" é
-                                    // propriedade do serviço; "vale a pena" é medição DESTA
-                                    // máquina. Um serviço seguro que não custa nada aqui
-                                    // continua seguro — só não vale o trabalho.
-                                    if s.auditado: Text {
-                                        text: s.recomendado ? "· seguro e vale a pena" : "· seguro, mas não custa nada aqui";
-                                        font-size: 11.5px;
-                                        color: s.recomendado ? Th.good : Th.text-dim;
-                                        vertical-alignment: center;
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                if s.explicacao != "": Text {
-                                    text: s.explicacao;
-                                    font-size: 11.5px;
-                                    color: Th.text-dim;
-                                    wrap: word-wrap;
-                                }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        background: Th.surface;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Th.border;
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 5px;
+                            Text { text: "POR DISCO"; font-size: 11px; font-weight: 800; color: Th.text-dim; }
+                            for m in root.disco-por-montagem: HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: m.chave; font-size: 12.5px; color: Th.text; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text { text: m.tamanho; font-size: 12.5px; font-family: "monospace"; color: Th.text; }
                             }
                         }
                     }
+                    Rectangle {
+                        background: Th.surface;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Th.border;
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 5px;
+                            Text { text: "POR TIPO"; font-size: 11px; font-weight: 800; color: Th.text-dim; }
+                            for k in root.disco-por-tipo: HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: k.chave; font-size: 12.5px; color: Th.text; }
+                                // "custa rede" é a diferença entre refazer em segundos e
+                                // refazer baixando gigabytes de novo — quem está num plano
+                                // limitado precisa saber ANTES de apagar.
+                                if k.custa-rede: Text {
+                                    text: "· baixa de novo";
+                                    font-size: 11px;
+                                    color: Th.warn;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text { text: k.tamanho; font-size: 12.5px; font-family: "monospace"; color: Th.text; }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    background: Th.surface;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: Th.border;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 7px;
+                        Text { text: "MAIORES ACHADOS"; font-size: 11px; font-weight: 800; color: Th.text-dim; }
+                        if root.disco-achados.length == 0 && root.disco-erro == "": Text {
+                            text: "Nada recriável encontrado nos diretórios de dev cadastrados.";
+                            font-size: 12.5px;
+                            color: Th.text-dim;
+                            wrap: word-wrap;
+                        }
+                        for a in root.disco-achados: VerticalLayout {
+                            spacing: 2px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: a.caminho; font-size: 12.5px; color: Th.text; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: a.dias-parado + " dia(s) parado";
+                                    font-size: 11.5px;
+                                    color: Th.text-dim;
+                                }
+                                Text { text: a.tamanho; font-size: 12.5px; font-family: "monospace"; color: Th.text; }
+                            }
+                            // COMO se refaz, e não só "pode apagar": é o que separa uma tela
+                            // que informa de uma que convida ao risco.
+                            if a.refaz != "": Text {
+                                text: "  refaz-se: " + a.refaz;
+                                font-size: 11.5px;
+                                color: Th.text-dim;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- ABA AGENTES (4) ----
+        //
+        // Quantos agentes cabem em PARALELO nesta máquina, e qual dos três tetos manda.
+        if root.erro == "" && root.aba == 4: Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: agt.preferred-height;
+            agt := VerticalLayout {
+                width: parent.width;
+                spacing: 12px;
+
+                if root.agentes-erro != "": Text {
+                    text: root.agentes-erro;
+                    font-size: 12.5px;
+                    color: Th.warn;
+                    wrap: word-wrap;
+                }
+
+                Rectangle {
+                    background: Th.surface;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: Th.border;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+                        Text {
+                            text: root.ag-cabem;
+                            font-size: 20px;
+                            font-weight: 800;
+                            color: Th.text;
+                        }
+                        // O GARGALO é a parte acionável. "Cabem 4" sozinho não diz nada;
+                        // saber que o teto é de RAM e não de núcleos é a diferença entre
+                        // fechar o navegador e trocar de máquina.
+                        Text {
+                            text: "Quem limita: " + root.ag-gargalo;
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: Th.accent;
+                        }
+                        Text { text: root.ag-rodando; font-size: 12.5px; color: Th.text-dim; }
+                        if root.ag-ram-apertada: Text {
+                            text: "A memória está apertada agora — abrir mais um agente vai competir com o que já roda.";
+                            font-size: 12px;
+                            color: Th.warn;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    Ficha { label: "Threads"; value: root.ag-threads; horizontal-stretch: 1; }
+                    Ficha { label: "RAM disponível"; value: root.ag-ram; horizontal-stretch: 1; }
+                    Ficha { label: "Carga (1 min)"; value: root.ag-carga; horizontal-stretch: 1; }
                 }
             }
         }

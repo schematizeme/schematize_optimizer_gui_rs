@@ -520,3 +520,268 @@ mod tests {
         assert_eq!(ler_diag(&com_prosa).unwrap(), ler_diag(DIAG).unwrap());
     }
 }
+
+// ============================ ABA DISCO ============================
+//
+// O inventário do lixo RECRIÁVEL, lido do `disco --json`. Ele saiu do hub na E3 da extradição
+// (ADR-0011/0018): enquanto morava lá, existiam DUAS telas do mesmo produto.
+
+/// Um total agregado — serve às duas visões de cima da aba (por disco e por tipo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TotalDisco {
+    /// O ponto de montagem, ou o tipo de artefato — depende da visão.
+    pub chave: String,
+    pub bytes: u64,
+    /// `true` quando refazer isto **baixa da rede** de novo. Só faz sentido por TIPO.
+    pub custa_rede: bool,
+}
+
+/// Um achado: uma pasta concreta que pode ser apagada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Achado {
+    pub caminho: String,
+    pub tipo: String,
+    pub bytes: u64,
+    pub dias_parado: i64,
+    pub montagem: String,
+    /// Como isto se refaz, em uma linha. **Vem pronto do app**, e não é montado aqui: é o
+    /// mesmo texto que o terminal imprime, e duas versões dele divergiriam.
+    pub refaz: String,
+}
+
+/// O que a aba Disco mostra.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Disco {
+    pub total_bytes: u64,
+    pub por_montagem: Vec<TotalDisco>,
+    pub por_tipo: Vec<TotalDisco>,
+    pub achados: Vec<Achado>,
+}
+
+/// **O quê:** lê o `disco --json`.
+///
+/// **Onde:** a aba Disco. PURA.
+///
+/// **Número negativo ou ausente vira ZERO, e nunca um tamanho inventado.** A frase desta tela
+/// é "isto pode ser apagado"; um número errado ali é um convite a apagar a coisa errada.
+pub fn ler_disco(texto: &str) -> Result<Disco, String> {
+    let j = json::ler(texto).map_err(|e| format!("resposta do optimizer ilegível: {e}"))?;
+    let totais = |chave: &str| -> Vec<TotalDisco> {
+        j.arr(chave)
+            .iter()
+            .map(|t| TotalDisco {
+                // A chave tem nome diferente nas duas listas, e é o mesmo papel na tela.
+                chave: if chave == "por_montagem" {
+                    t.str_ou_vazio("montagem")
+                } else {
+                    t.str_ou_vazio("tipo")
+                },
+                bytes: bytes_de(t, "bytes"),
+                custa_rede: t.bool("custa_rede") == Some(true),
+            })
+            .collect()
+    };
+    Ok(Disco {
+        total_bytes: bytes_de(&j, "total_bytes"),
+        por_montagem: totais("por_montagem"),
+        por_tipo: totais("por_tipo"),
+        achados: j
+            .arr("achados")
+            .iter()
+            .map(|a| Achado {
+                caminho: a.str_ou_vazio("caminho"),
+                tipo: a.str_ou_vazio("tipo"),
+                bytes: bytes_de(a, "bytes"),
+                dias_parado: a.num("dias_parado").filter(|n| *n >= 0.0).unwrap_or(0.0) as i64,
+                montagem: a.str_ou_vazio("montagem"),
+                refaz: a.str_ou_vazio("refaz_text"),
+            })
+            .collect(),
+    })
+}
+
+/// **O quê:** um campo de bytes, nunca negativo. **Onde:** [`ler_disco`].
+fn bytes_de(j: &json::Json, chave: &str) -> u64 {
+    j.num(chave).filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0) as u64
+}
+
+/// **O quê:** bytes em texto curto (`6,3 GB`).
+///
+/// **Onde:** a aba Disco.
+///
+/// **Base 1000 e não 1024**, porque é o que o fabricante do disco e o gerenciador de arquivos
+/// do sistema usam. Mostrar GiB aqui faria o total da tela não bater com o que a pessoa vê no
+/// resto da máquina, e ela concluiria que uma das duas contas está errada.
+pub fn tamanho(bytes: u64) -> String {
+    const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut i = 0;
+    while v >= 1000.0 && i + 1 < U.len() {
+        v /= 1000.0;
+        i += 1;
+    }
+    if i == 0 {
+        return format!("{bytes} B");
+    }
+    format!("{v:.1} {}", U[i])
+}
+
+// ============================ ABA AGENTES ============================
+
+/// Quantos agentes esta máquina aguenta em paralelo, e por quê.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Agentes {
+    pub threads: i64,
+    pub mem_available_mb: i64,
+    pub load1: f64,
+    pub running: i64,
+    pub cpu_cap: i64,
+    pub ram_cap: i64,
+    pub load_cap: i64,
+    /// O menor dos três tetos — é ele que vale.
+    pub total_cap: i64,
+    /// Quantos ainda cabem AGORA. Nunca negativo.
+    pub available: i64,
+    pub ram_tight: bool,
+}
+
+impl Agentes {
+    /// **O quê:** qual dos três tetos é o que está mandando.
+    ///
+    /// **Onde:** a aba Agentes, para dizer O QUE limitar se a pessoa quiser mais.
+    ///
+    /// **Existe porque "cabem 4" sozinho não diz nada acionável.** Saber que o teto é de RAM e
+    /// não de CPU é a diferença entre fechar o navegador e comprar um processador.
+    pub fn gargalo(&self) -> &'static str {
+        if self.total_cap == self.ram_cap && self.ram_cap <= self.cpu_cap.min(self.load_cap) {
+            return "memória";
+        }
+        if self.total_cap == self.cpu_cap && self.cpu_cap <= self.load_cap {
+            return "núcleos";
+        }
+        if self.total_cap == self.load_cap {
+            return "carga atual da máquina";
+        }
+        "—"
+    }
+}
+
+/// **O quê:** lê o `agentes --json`.
+///
+/// **Onde:** a aba Agentes. PURA.
+///
+/// **`available` nunca fica negativo.** Rodando 5 com teto 4, a conta dá -1; mostrar "-1
+/// disponíveis" é uma frase que ninguém sabe ler. Zero, e a tela diz que já passou do teto.
+pub fn ler_agentes(texto: &str) -> Result<Agentes, String> {
+    let j = json::ler(texto).map_err(|e| format!("resposta do optimizer ilegível: {e}"))?;
+    let n = |c: &str| -> i64 { j.num(c).filter(|v| v.is_finite()).unwrap_or(0.0) as i64 };
+    Ok(Agentes {
+        threads: n("threads"),
+        mem_available_mb: n("mem_available_mb"),
+        load1: j.num("load1").filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0),
+        running: n("running_claudes"),
+        cpu_cap: n("cpu_cap"),
+        ram_cap: n("ram_cap"),
+        load_cap: n("load_cap"),
+        total_cap: n("total_cap"),
+        available: n("available").max(0),
+        ram_tight: j.bool("ram_tight") == Some(true),
+    })
+}
+
+#[cfg(test)]
+mod tests_disco_agentes {
+    use super::*;
+
+    const DISCO: &str = r#"{"optimizer":"0.4.0","total_bytes":7544807424,
+      "por_montagem":[{"montagem":"/home","bytes":7544807424}],
+      "por_tipo":[{"tipo":"go-cache","bytes":6264434688,"custa_rede":true},
+                  {"tipo":"cargo-cache","bytes":768831488,"custa_rede":false}],
+      "achados":[{"caminho":"/home/u/go/pkg/mod","tipo":"go-cache","bytes":5725962240,
+                  "dias_parado":15,"montagem":"/home","refaz_text":"baixado de novo no go build"}]}"#;
+
+    #[test]
+    fn le_o_disco() {
+        let d = ler_disco(DISCO).expect("lê");
+        assert_eq!(d.total_bytes, 7_544_807_424);
+        assert_eq!(d.por_montagem[0].chave, "/home", "a chave da visão por montagem é o mount");
+        assert_eq!(d.por_tipo[0].chave, "go-cache", "e a da visão por tipo é o tipo");
+        assert!(d.por_tipo[0].custa_rede);
+        assert!(!d.por_tipo[1].custa_rede);
+        assert_eq!(d.achados[0].dias_parado, 15);
+        assert_eq!(d.achados[0].refaz, "baixado de novo no go build");
+    }
+
+    /// **Número ausente, negativo ou de tipo errado vira ZERO — nunca um tamanho inventado.**
+    ///
+    /// A frase desta tela é "isto pode ser apagado". Um número errado ali é um convite a apagar
+    /// a coisa errada, e o valor coagido é indistinguível do medido depois que entra.
+    #[test]
+    fn tamanho_ruim_nao_vira_afirmacao() {
+        let d = ler_disco(
+            r#"{"total_bytes":"muitos","achados":[
+              {"caminho":"/a","bytes":-5,"dias_parado":-3},
+              {"caminho":"/b"}]}"#,
+        )
+        .expect("lê");
+        assert_eq!(d.total_bytes, 0, "texto não vira número");
+        assert_eq!(d.achados[0].bytes, 0, "negativo não vira tamanho");
+        assert_eq!(d.achados[0].dias_parado, 0);
+        assert_eq!(d.achados[1].bytes, 0, "campo ausente é zero, não lixo");
+    }
+
+    /// **Base 1000, como o disco e o gerenciador de arquivos.** Em GiB o total desta tela não
+    /// bateria com o que a pessoa vê no resto da máquina.
+    #[test]
+    fn o_tamanho_usa_a_mesma_base_do_sistema() {
+        assert_eq!(tamanho(0), "0 B");
+        assert_eq!(tamanho(999), "999 B");
+        assert_eq!(tamanho(1_000), "1.0 KB");
+        assert_eq!(tamanho(7_544_807_424), "7.5 GB");
+        // Em base 1024 isto daria 7.0 GiB — e a pessoa acharia que uma das contas mente.
+        assert_ne!(tamanho(7_544_807_424), "7.0 GB");
+    }
+
+    #[test]
+    fn le_os_agentes() {
+        let a = ler_agentes(
+            r#"{"threads":8,"mem_available_mb":9313,"load1":1.95,"running_claudes":3,
+                "cpu_cap":4,"ram_cap":7,"load_cap":6,"total_cap":4,"available":1,
+                "ram_tight":false}"#,
+        )
+        .expect("lê");
+        assert_eq!((a.threads, a.total_cap, a.available), (8, 4, 1));
+        assert_eq!(a.gargalo(), "núcleos", "o teto que manda é o de CPU");
+    }
+
+    /// **O gargalo é a informação ACIONÁVEL.** "Cabem 4" sozinho não diz nada; saber que o
+    /// teto é de RAM e não de CPU é a diferença entre fechar o navegador e trocar de máquina.
+    #[test]
+    fn o_gargalo_nomeia_o_teto_que_manda() {
+        let ler = |s: &str| ler_agentes(s).expect("lê");
+        let a = ler(r#"{"cpu_cap":8,"ram_cap":2,"load_cap":6,"total_cap":2}"#);
+        assert_eq!(a.gargalo(), "memória");
+        let a = ler(r#"{"cpu_cap":8,"ram_cap":9,"load_cap":1,"total_cap":1}"#);
+        assert_eq!(a.gargalo(), "carga atual da máquina");
+    }
+
+    /// **`available` nunca fica negativo.** Rodando 5 com teto 4 a conta dá -1, e "-1
+    /// disponíveis" é uma frase que ninguém sabe ler.
+    #[test]
+    fn nunca_ha_menos_de_zero_disponivel() {
+        let a = ler_agentes(r#"{"total_cap":4,"running_claudes":5,"available":-1}"#).expect("lê");
+        assert_eq!(a.available, 0);
+    }
+
+    /// Entrada hostil não panica — janela que morre ao abrir é pior que tela vazia.
+    #[test]
+    fn entrada_hostil_nao_panica() {
+        let fundo = format!("{}{}", "[".repeat(3000), "]".repeat(3000));
+        for lixo in
+            ["", "null", "[]", "0", "\"t\"", "\u{0}", &fundo, r#"{"achados":"nao e lista"}"#]
+        {
+            let _ = ler_disco(lixo);
+            let _ = ler_agentes(lixo);
+        }
+    }
+}

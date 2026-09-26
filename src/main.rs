@@ -30,6 +30,7 @@
 
 mod cli;
 mod json;
+mod procedencia;
 mod telas;
 mod terminal;
 
@@ -128,11 +129,89 @@ fn aplicar_servicos(w: &MainWindow, r: Result<Vec<telas::Servico>, String>) {
     w.set_servicos(slint::ModelRc::new(slint::VecModel::from(modelo)));
 }
 
+/// **O quê:** escreve a aba Disco. **Onde:** [`recarregar`].
+///
+/// **O erro é PRÓPRIO da aba**, e não o erro global: o `disco` varre o sistema de arquivos e
+/// pode falhar por permissão num diretório enquanto o `diag` e o `limits` respondem bem. Um
+/// erro global apagaria as quatro telas por causa de uma.
+fn aplicar_disco(w: &MainWindow, r: Result<telas::Disco, String>) {
+    match r {
+        Ok(d) => {
+            w.set_disco_erro(slint::SharedString::new());
+            w.set_disco_total(telas::tamanho(d.total_bytes).into());
+            let totais = |v: &[telas::TotalDisco]| {
+                slint::ModelRc::new(slint::VecModel::from(
+                    v.iter()
+                        .map(|x| TotalDiscoUI {
+                            chave: x.chave.clone().into(),
+                            tamanho: telas::tamanho(x.bytes).into(),
+                            custa_rede: x.custa_rede,
+                        })
+                        .collect::<Vec<_>>(),
+                ))
+            };
+            w.set_disco_por_montagem(totais(&d.por_montagem));
+            w.set_disco_por_tipo(totais(&d.por_tipo));
+            w.set_disco_achados(slint::ModelRc::new(slint::VecModel::from(
+                d.achados
+                    .iter()
+                    .map(|a| AchadoUI {
+                        caminho: a.caminho.clone().into(),
+                        tipo: a.tipo.clone().into(),
+                        tamanho: telas::tamanho(a.bytes).into(),
+                        dias_parado: a.dias_parado as i32,
+                        refaz: a.refaz.clone().into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        }
+        Err(e) => {
+            // Listas VAZIAS com o erro na tela, e nunca vazias caladas: "nada recriável" sobre
+            // uma falha de leitura faria a pessoa concluir que a máquina está limpa.
+            w.set_disco_achados(slint::ModelRc::new(slint::VecModel::from(Vec::<AchadoUI>::new())));
+            w.set_disco_total("—".into());
+            w.set_disco_erro(e.into());
+        }
+    }
+}
+
+/// **O quê:** escreve a aba Agentes. **Onde:** [`recarregar`].
+fn aplicar_agentes(w: &MainWindow, r: Result<telas::Agentes, String>) {
+    match r {
+        Ok(a) => {
+            w.set_agentes_erro(slint::SharedString::new());
+            // A frase de cima diz o NÚMERO e o estado, não só o número: "cabem 4" com 5
+            // rodando seria uma tela que ignora o que está acontecendo nela mesma.
+            w.set_ag_cabem(
+                if a.available == 0 && a.running >= a.total_cap {
+                    format!("Já no teto: {} em paralelo", a.total_cap)
+                } else {
+                    format!("Cabem mais {} agente(s) agora (teto {})", a.available, a.total_cap)
+                }
+                .into(),
+            );
+            w.set_ag_rodando(format!("{} rodando neste momento", a.running).into());
+            w.set_ag_gargalo(a.gargalo().into());
+            w.set_ag_threads(format!("{}", a.threads).into());
+            w.set_ag_ram(format!("{} MB", a.mem_available_mb).into());
+            w.set_ag_carga(format!("{:.2}", a.load1).into());
+            w.set_ag_ram_apertada(a.ram_tight);
+        }
+        Err(e) => {
+            w.set_ag_cabem("—".into());
+            w.set_ag_gargalo("—".into());
+            w.set_agentes_erro(e.into());
+        }
+    }
+}
+
 /// **O quê:** lê tudo e aplica na janela. **Onde:** a abertura e o botão de recarregar.
 fn recarregar(w: &MainWindow) {
     aplicar_diag(w, cli::ler_json(&["diag"]).and_then(|t| telas::ler_diag(&t)));
     aplicar_limites(w, cli::ler_json(&["limits"]).and_then(|t| telas::ler_limites(&t)));
     aplicar_servicos(w, cli::ler_json(&["services"]).and_then(|t| telas::ler_servicos(&t)));
+    aplicar_disco(w, cli::ler_json(&["disco"]).and_then(|t| telas::ler_disco(&t)));
+    aplicar_agentes(w, cli::ler_json(&["agentes"]).and_then(|t| telas::ler_agentes(&t)));
 }
 
 /// **O quê:** dispara `limits --apply` ou `limits --revert` num TERMINAL (D6).
@@ -165,8 +244,12 @@ fn agir(flag: &str) -> String {
 /// trocaria uma janela que funciona por nenhuma.
 fn aba_inicial(args: impl Iterator<Item = String>) -> i32 {
     for a in args {
-        if a == "--limites" || a == "--limits" {
-            return 1;
+        match a.as_str() {
+            "--limites" | "--limits" => return 1,
+            "--servicos" | "--services" => return 2,
+            "--disco" | "--disk" => return 3,
+            "--agentes" | "--agents" => return 4,
+            _ => {}
         }
     }
     0
@@ -183,7 +266,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Responder e sair é o contrato mínimo de um binário de linha de comando — inclusive de um
     // que normalmente abre janela.
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("schematize-optimizer-gui {}", env!("CARGO_PKG_VERSION"));
+        println!("schematize-optimizer-gui {}", procedencia::rotulo_versao());
         return Ok(());
     }
 
@@ -228,10 +311,31 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let weak = w.as_weak();
+        w.on_disco_limpar(move || {
+            let Some(w) = weak.upgrade() else { return };
+            // **Apagar passa por TERMINAL (D6), e sem `--yes`.** O `disco-clean` mostra a
+            // lista ANTES e pergunta; a poda de volumes do Docker pergunta mesmo com `--yes`,
+            // porque volume é DADO. Um botão que apagasse daqui tiraria da pessoa a única
+            // chance de ver o que vai embora — e o que vai embora é um caminho no disco dela.
+            let bin = cli::bin().display().to_string();
+            let cmd = cli::comando_para_terminal(&bin, &["disco-clean"]);
+            let msg = if terminal::abrir(&cmd) {
+                "terminal aberto — a lista aparece lá, e ele pergunta antes de apagar. Depois, clique em «Recarregar».".to_string()
+            } else {
+                format!("não achei um terminal. Rode: {cmd}")
+            };
+            w.set_msg(msg.into());
+        });
+    }
+    {
+        let weak = w.as_weak();
         // O estado do colapso vive aqui e não no `.slint` porque é o Rust que o alterna; um
         // `in-out` que os dois lados escrevem é onde nasce a divergência entre o que a janela
         // acha que está aberto e o que está.
-        let abertos = Rc::new(RefCell::new(false));
+        // Começa ABERTA: numa aba própria, a lista é a resposta. O valor inicial aqui tem de
+        // bater com o do `.slint` — dois defaults diferentes fazem o primeiro clique parecer
+        // que não funcionou.
+        let abertos = Rc::new(RefCell::new(true));
         w.on_alternar_servicos(move || {
             if let Some(w) = weak.upgrade() {
                 let novo = !*abertos.borrow();
@@ -242,6 +346,92 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     w.run()
+}
+
+#[cfg(test)]
+mod tests_aba_extradicao {
+    use super::aba_inicial;
+
+    fn v(a: &[&str]) -> std::vec::IntoIter<String> {
+        a.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
+    }
+
+    /// **As CINCO abas abrem por flag, e em português E inglês.**
+    ///
+    /// É por aqui que o hub delega — ele já sabe em qual assunto a pessoa estava, e obrigá-la
+    /// a achar a aba de novo seria a delegação perdendo a única informação que tinha.
+    #[test]
+    fn as_cinco_abas_abrem_por_flag() {
+        for (flag, n) in [
+            ("--limites", 1),
+            ("--limits", 1),
+            ("--servicos", 2),
+            ("--services", 2),
+            ("--disco", 3),
+            ("--disk", 3),
+            ("--agentes", 4),
+            ("--agents", 4),
+        ] {
+            assert_eq!(aba_inicial(v(&[flag])), n, "{flag}");
+        }
+        assert_eq!(aba_inicial(v(&[])), 0, "sem flag, o Diagnóstico");
+    }
+
+    /// **Todo destino tem uma aba no `.slint`.** Sem isto, uma flag apontando para um número
+    /// sem tela abriria a janela em BRANCO — e nada reprovaria, porque o Rust compila e o
+    /// Slint não sabe que o número veio de uma flag.
+    #[test]
+    fn todo_destino_existe_no_slint() {
+        let ui = include_str!("../ui/optimizer.slint");
+        for n in 0..=4 {
+            assert!(
+                ui.contains(&format!("root.aba == {n}")),
+                "a aba {n} não existe no optimizer.slint — a janela abriria em BRANCO"
+            );
+        }
+        // Self-check: a 9 não existe, e se esta asserção parar de valer o varredor cegou.
+        assert!(!ui.contains("root.aba == 9"), "o self-check parou de valer");
+    }
+
+    /// **Apagar disco passa por TERMINAL (D6), e sem `--yes`.**
+    ///
+    /// O `disco-clean` mostra a lista ANTES e pergunta; a poda de volumes do Docker pergunta
+    /// mesmo com `--yes`, porque volume é DADO — banco de dev, upload de teste. Um botão que
+    /// apagasse daqui tiraria da pessoa a única chance de ver o que vai embora.
+    #[test]
+    fn apagar_disco_nao_acontece_na_janela() {
+        let fonte = include_str!("main.rs");
+        let producao = fonte.split("#[cfg(test)]").next().expect("há código antes dos testes");
+        let i = producao.find("on_disco_limpar").expect("o callback sumiu");
+        let corpo = &producao[i..producao.len().min(i + 900)];
+        assert!(corpo.contains("terminal::abrir"), "apagar tem de abrir TERMINAL");
+        assert!(corpo.contains("\"disco-clean\""), "perdeu o subcomando");
+        // **O varredor ignora COMENTÁRIO, e isso foi aprendido errando — duas vezes.**
+        //
+        // A primeira versão procurava `--yes` no trecho inteiro e reprovou por causa do
+        // comentário MEU que diz *"pergunta mesmo com `--yes`"*. Proibir a palavra proíbe
+        // explicar a regra; é o mesmo erro que a janela do database cometeu com
+        // `Command::new` e a do deployer com `passphrase`. Comentário CITA; a linha USA.
+        let linhas: Vec<&str> =
+            corpo.lines().map(str::trim_start).filter(|l| !l.starts_with("//")).collect();
+        assert!(
+            !linhas.iter().any(|l| l.contains("--yes")),
+            "`--yes` aqui tira a pergunta que protege o DADO"
+        );
+        // Self-check: o comentário que EXPLICA a regra tem de continuar passando.
+        assert!(corpo.contains("`--yes`"), "proibir a palavra proibiria explicar a política");
+        // E a janela não apaga arquivo por conta própria, em lugar nenhum.
+        let codigo: Vec<&str> =
+            producao.lines().map(str::trim_start).filter(|l| !l.starts_with("//")).collect();
+        for proibido in ["remove_dir_all", "remove_file", "fs::remove"] {
+            assert!(
+                !codigo.iter().any(|l| l.contains(proibido)),
+                "a janela apagou do disco (`{proibido}`) — quem apaga é o binário, no terminal"
+            );
+        }
+        // Self-check: o varredor acha o que procura quando ele está lá.
+        assert!(codigo.iter().any(|l| l.contains("terminal::abrir")), "o varredor está cego");
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +484,23 @@ mod tests {
 
 #[cfg(test)]
 mod tests_versao {
+    /// **A janela responde a versão COM a procedência, como o CLI irmão.**
+    ///
+    /// Medido lado a lado: o CLI dizia `0.4.0 (b9fcc65)` e esta janela dizia `0.4.0` seco. O
+    /// número sozinho não distingue dois binários com o mesmo `Cargo.toml` e comportamento
+    /// diferente — e aqui isso não é hipótese: um binário de 15 dias atrás passou por novo e
+    /// gravou o `.desktop` errado, porque a versão batia.
+    #[test]
+    fn a_versao_carrega_a_procedencia() {
+        let fonte = include_str!("main.rs");
+        let producao = fonte.split("#[cfg(test)]").next().expect("há código antes dos testes");
+        assert!(
+            !producao.contains("env!(\"CARGO_PKG_VERSION\")"),
+            "a janela usou o número seco — use `procedencia::rotulo_versao()`, que traz o SHA"
+        );
+        assert!(producao.contains("procedencia::rotulo_versao()"), "a versão perdeu a procedência");
+    }
+
     /// **A janela responde `--version` e SAI, em vez de abrir.**
     ///
     /// Lê o próprio fonte e exige que a checagem seja a PRIMEIRA coisa do `main` — antes de

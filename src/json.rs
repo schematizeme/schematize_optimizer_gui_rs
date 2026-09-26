@@ -87,6 +87,20 @@ impl Json {
         }
     }
 
+    /// **O quê:** o número de uma chave. `None` se ausente, `null`, ou de OUTRO TIPO.
+    ///
+    /// **Onde:** as abas Disco (bytes, dias parado) e Agentes (threads, RAM, tetos).
+    ///
+    /// **Texto NÃO vira número, nem com `parse()`.** Coerção aqui faria a tela afirmar um
+    /// tamanho ou um teto que ninguém mediu — e o valor coagido é indistinguível do valor de
+    /// verdade depois que entra. É o que a §37 proíbe.
+    pub fn num(&self, chave: &str) -> Option<f64> {
+        match self.get(chave)? {
+            Json::Num(n) => Some(*n),
+            _ => None,
+        }
+    }
+
     /// **O quê:** os itens de uma lista. Lista vazia se a chave não existe ou não é lista.
     ///
     /// **Onde:** `languages`, `tools`, `apps`, `methods`.
