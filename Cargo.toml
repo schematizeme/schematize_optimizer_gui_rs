@@ -26,6 +26,9 @@ slint = { version = "1.17", default-features = false, features = [
     "accessibility",
 ] }
 
+# TEMP(ADR-0026): trocar por git = "https://github.com/schematizeme/schematize_plataforma_rs", tag = "v0.2.0" ao publicar
+schematize_plataforma = { path = "../schematize_plataforma_rs", default-features = false, features = ["parasita"] }
+
 [build-dependencies]
 slint-build = "1.17"
 

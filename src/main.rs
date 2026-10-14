@@ -30,7 +30,6 @@
 
 mod cli;
 mod json;
-mod market_parasita;
 mod procedencia;
 mod telas;
 mod terminal;
@@ -273,7 +272,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Parasita do market (contrato 2026-10-13): garante schematize-market e -gui em
     // ~/.cargo/bin ANTES de abrir a janela. Nunca derruba a janela — falha vira linha no stderr.
-    market_parasita::garantir();
+    schematize_plataforma::parasita::garantir(&schematize_plataforma::parasita::Config::new(
+        "schematize",
+    ));
 
     let w = MainWindow::new()?;
     w.set_aba(aba_inicial(std::env::args().skip(1)));
@@ -546,9 +547,8 @@ mod tests_versao {
         let i = producao.find("fn main(").expect("há um main");
         let corpo = &producao[i..];
         let versao = corpo.find("\"--version\"").expect("o main responde --version");
-        let parasita = corpo
-            .find("market_parasita::garantir()")
-            .expect("a janela tem de chamar o parasita do market");
+        let parasita =
+            corpo.find("parasita::garantir(").expect("a janela tem de chamar o parasita do market");
         let janela = corpo.find("MainWindow::new").expect("o main cria a janela");
         assert!(versao < parasita, "o parasita roda ANTES do --version — baixaria em --version");
         assert!(parasita < janela, "o parasita roda DEPOIS de abrir a janela — tem de ser antes");
